@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}林火卫星热点林班归属{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">林火热点 · 林班归属</a>
+  <div class="topbar-meta">
+    {% if active_map %}
+      <span class="pill pill-active">底图 v{{ active_map.id }}</span>
+      <span class="muted">{{ active_map.filename }} · {{ active_map.feature_count }} 个林班</span>
+    {% else %}
+      <span class="pill pill-warn">尚未发布底图</span>
+    {% endif %}
+  </div>
+</header>
+<main>
+  {% if msg %}<div class="flash flash-ok">{{ msg }}</div>{% endif %}
+  {% if err %}<div class="flash flash-err">{{ err }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+<footer class="foot">
+  归属规则：仅落入一个林班（含边界）赋码；落入重叠区或共边 = 归属冲突；区外 = 未匹配。
+  每条来源记录保留，不合并重复热点。
+</footer>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "type": "FeatureCollection",
+  "name": "compartments_v1",
+  "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}},
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"code": "A-01", "林班号": "A-01", "name": "甲一号林班"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[100.0, 25.0], [100.1, 25.0], [100.1, 25.1], [100.0, 25.1], [100.0, 25.0]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"code": "B-02", "林班号": "B-02", "name": "乙二号林班"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[100.1, 25.0], [100.2, 25.0], [100.2, 25.1], [100.1, 25.1], [100.1, 25.0]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"code": "C-03", "林班号": "C-03", "name": "丙三号林班"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[100.2, 25.0], [100.3, 25.0], [100.3, 25.1], [100.2, 25.1], [100.2, 25.0]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"code": "D-04", "林班号": "D-04", "name": "丁四号林班"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[100.0, 25.1], [100.1, 25.1], [100.1, 25.2], [100.0, 25.2], [100.0, 25.1]]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {"code": "E-05", "林班号": "E-05", "name": "戊五号林班（与甲/乙/丁存在重叠）"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[100.07, 25.07], [100.13, 25.07], [100.13, 25.13], [100.07, 25.13], [100.07, 25.07]]]
+      }
+    }
+  ]
+}

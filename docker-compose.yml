@@ -1,0 +1,41 @@
+name: forest-hotspot
+
+# Two web instances share one SQLite database on a volume.  Both instances run
+# a worker, so a queued computation is picked up by whichever is free; SQLite
+# `BEGIN IMMEDIATE` transactions make version swaps and publication mutually
+# exclusive across processes.
+#
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# Scale instances with: docker compose up --scale web-b=2 ... (each instance
+# must have its own container name/port; the two named services below are the
+# supported, reproducible demo of the multi-instance requirement).
+
+x-app: &app
+  build: .
+  image: forest-hotspot:1.0.0
+  environment: &app-env
+    FOREST_DB_PATH: /data/forest.db
+    FOREST_RUN_WORKER: "1"
+    FOREST_STALE_RUN_SECONDS: "120"
+    FOREST_UPLOAD_MAX_MB: "32"
+  volumes:
+    - forest-data:/data
+  restart: unless-stopped
+
+services:
+  web-a:
+    <<: *app
+    container_name: forest-web-a
+    ports:
+      - "8080:8000"
+
+  web-b:
+    <<: *app
+    container_name: forest-web-b
+    ports:
+      - "8081:8000"
+
+volumes:
+  forest-data:

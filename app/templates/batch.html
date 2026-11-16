@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}批次 #{{ batch.id }} · 林班归属{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="split">
+    <div>
+      <h2>批次 #{{ batch.id }} <span class="muted mono">{{ batch.filename }}</span></h2>
+      <p class="hint">{{ batch.row_count }} 条来源热点 · 上传于 {{ batch.created_at }}</p>
+    </div>
+    <div class="actions">
+      <form method="post" action="/batches/{{ batch.id }}/recompute" class="inline">
+        <button type="submit" {% if not active_map %}{% endif %}>按当前底图重算</button>
+      </form>
+      {% if published %}
+        <a class="button secondary" href="/batches/{{ batch.id }}/download.csv">下载明细 CSV</a>
+      {% endif %}
+      <a class="button secondary" href="/">返回</a>
+    </div>
+  </div>
+
+  {% if pending %}
+    <p class="note">计算进行中，本页显示的是上一份已发布结果；刷新查看最新状态。</p>
+  {% endif %}
+
+  {% if published %}
+    <div class="stat-row">
+      <div class="stat"><span class="num">{{ published.total_count }}</span><span class="lbl">来源热点</span></div>
+      <div class="stat stat-ok"><span class="num">{{ published.matched_count }}</span><span class="lbl">已赋码</span></div>
+      <div class="stat stat-warn"><span class="num">{{ published.conflict_count }}</span><span class="lbl">归属冲突</span></div>
+      <div class="stat stat-mut"><span class="num">{{ published.unmatched_count }}</span><span class="lbl">未匹配</span></div>
+    </div>
+    <p class="hint">
+      下载内容基于 <strong>计算 run #{{ published.id }}</strong>，
+      林班底图 <strong>v{{ published.map_version_id }} · {{ published.map_filename }}</strong>
+      （sha256 <span class="mono">{{ published.map_sha256[:16] }}…</span>），
+      发布于 {{ published.finished_at }}。
+    </p>
+    {% if active_map and active_map.id != published.map_version_id %}
+      <div class="flash flash-warn">
+        当前底图已更换为 v{{ active_map.id }}，但此处下载的仍是基于 v{{ published.map_version_id }} 的已发布结果。
+        点击"按当前底图重算"生成新版本结果。
+      </div>
+    {% endif %}
+  {% else %}
+    <div class="flash flash-warn">
+      {% if batch.latest_status == 'failed' %}最近一次计算失败：{{ batch.error or '' }}{% else %}
+      该批次还没有已发布的明细{% if not active_map %}（尚未上传林班底图）{% endif %}。
+      {% endif %}
+    </div>
+  {% endif %}
+</section>
+
+{% if published and counts %}
+<section class="card">
+  <h2>冲突原因分布</h2>
+  <table class="compact">
+    <thead><tr><th>归属状态</th><th>原因</th><th>数量</th></tr></thead>
+    <tbody>
+      {% for row in counts %}
+      <tr class="{{ 'row-ok' if row.status == 'matched' else ('row-warn' if row.status == 'conflict' else 'row-mut') }}">
+        <td>{{ row.status_label }}</td>
+        <td>{{ row.reason_label }}</td>
+        <td>{{ row.count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <div class="split">
+    <h2>明细预览</h2>
+    <div class="actions">
+      {% if only_problems %}
+        <a class="button secondary" href="/batches/{{ batch.id }}">显示全部</a>
+      {% else %}
+        <a class="button secondary" href="/batches/{{ batch.id }}?only=problems">只看冲突与未匹配</a>
+      {% endif %}
+    </div>
+  </div>
+  <p class="hint">最多显示前 {{ per_page }} 条，完整数据请下载 CSV。</p>
+  <div class="table-wrap">
+  <table class="rows">
+    <thead>
+      <tr><th>行号</th><th>热点号</th><th>经度</th><th>纬度</th><th>UTC 时刻</th>
+          <th>状态</th><th>原因</th><th>林班号</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+    {% for row in preview %}
+      <tr class="{{ 'row-ok' if row.status == 'matched' else ('row-warn' if row.status == 'conflict' else 'row-mut') }}">
+        <td>{{ row.source_row }}</td>
+        <td class="mono">{{ row.hotspot_no }}</td>
+        <td class="mono">{{ '%.6f'|format(row.lon) }}</td>
+        <td class="mono">{{ '%.6f'|format(row.lat) }}</td>
+        <td class="mono">{{ row.observed_at_utc }}</td>
+        <td><span class="pill {{ 'pill-ok' if row.status == 'matched' else ('pill-warn' if row.status == 'conflict' else 'pill-mut') }}">{{ row.status_label }}</span></td>
+        <td>{{ row.reason_label }}</td>
+        <td class="mono">{{ row.code or '—' }}</td>
+        <td class="reason">{{ row.reason }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>计算记录</h2>
+  <table class="compact">
+    <thead>
+      <tr><th>Run</th><th>底图</th><th>状态</th><th>已赋码</th><th>冲突</th><th>未匹配</th><th>创建</th><th>完成</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr class="{{ 'row-current' if published and r.id == published.id }}">
+        <td>#{{ r.id }}{% if published and r.id == published.id %} <span class="pill pill-ok">已发布</span>{% endif %}</td>
+        <td>v{{ r.map_version_id }}</td>
+        <td>{{ r.status|run_status_label }}</td>
+        <td>{{ r.matched_count if r.status in ('succeeded','running') else '—' }}</td>
+        <td>{{ r.conflict_count if r.status in ('succeeded','running') else '—' }}</td>
+        <td>{{ r.unmatched_count if r.status in ('succeeded','running') else '—' }}</td>
+        <td class="mono">{{ r.created_at }}</td>
+        <td class="mono">{{ r.finished_at or '—' }}</td>
+        <td class="reason">{{ r.error or '' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">旧计算晚于新计算完成时不会被发布；更换底图后未按新底图完成的计算也会作废。</p>
+</section>
+{% endblock %}

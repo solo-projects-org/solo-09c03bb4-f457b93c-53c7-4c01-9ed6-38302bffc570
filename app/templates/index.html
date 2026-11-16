@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid">
+  <div class="card">
+    <h2>1. 上传林班多边形</h2>
+    <p class="hint">GeoJSON（Feature / FeatureCollection），每个要素需含林班号属性，
+      可识别键：<code>code</code>、<code>林班号</code>、<code>compartment</code> 等。发布后成为当前底图版本。</p>
+    <form method="post" action="/maps" enctype="multipart/form-data" class="stack">
+      <input type="file" name="file" accept=".geojson,.json,application/geo+json,application/json" required>
+      <button type="submit">发布为新底图版本</button>
+    </form>
+    {% if maps %}
+    <details class="versions">
+      <summary>版本历史（最近 {{ maps|length }} 个）</summary>
+      <table class="compact">
+        <thead><tr><th>版本</th><th>文件</th><th>林班数</th><th>发布时间 (UTC)</th><th>状态</th></tr></thead>
+        <tbody>
+        {% for m in maps %}
+          <tr>
+            <td>v{{ m.id }}</td>
+            <td class="mono">{{ m.filename }}</td>
+            <td>{{ m.feature_count }}{% if m.repaired_count %} <span class="muted">(修复 {{ m.repaired_count }})</span>{% endif %}</td>
+            <td class="mono">{{ m.created_at }}</td>
+            <td>{% if m.is_active %}<span class="pill pill-active">当前</span>{% else %}<span class="muted">历史</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>2. 上传卫星热点</h2>
+    <p class="hint">CSV 需含热点号、经度、纬度、UTC 时刻（表头可识别
+      <code>hotspot_no/lon/lat/observed_at</code> 及中文名）。上传后按当前底图自动排队计算。</p>
+    <form method="post" action="/batches" enctype="multipart/form-data" class="stack">
+      <input type="file" name="file" accept=".csv,text/csv" required>
+      <button type="submit">上传热点并计算</button>
+    </form>
+    <form method="post" action="/recompute-all" class="inline">
+      <button type="submit" class="secondary" {% if not active_map or not batches %}disabled{% endif %}>
+        当前底图重算全部批次
+      </button>
+    </form>
+    <p class="hint">更换底图后，点此按新版本重算同一批热点；旧结果会保留到新结果成功发布为止。</p>
+  </div>
+</section>
+
+<section class="card">
+  <h2>热点批次</h2>
+  {% if not batches %}
+    <p class="empty">还没有热点批次。可先使用 <code>samples/</code> 下的样例数据。</p>
+  {% else %}
+  <table class="rows">
+    <thead>
+      <tr>
+        <th>批次</th><th>文件</th><th>热点数</th><th>已发布结果</th>
+        <th>已赋码</th><th>冲突</th><th>未匹配</th><th>底图</th><th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for b in batches %}
+      <tr>
+        <td>#{{ b.id }}</td>
+        <td class="mono">{{ b.filename }}</td>
+        <td>{{ b.row_count }}</td>
+        <td>
+          {% if b.pub_run_id %}
+            run #{{ b.pub_run_id }}
+            {% if b.latest_status in ('queued','running') %}<span class="pill pill-warn">重算中</span>{% endif %}
+          {% elif b.latest_status == 'failed' %}
+            <span class="pill pill-err">计算失败</span>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td>{{ b.pub_matched if b.pub_matched is not none else '—' }}</td>
+        <td>{{ b.pub_conflict if b.pub_conflict is not none else '—' }}</td>
+        <td>{{ b.pub_unmatched if b.pub_unmatched is not none else '—' }}</td>
+        <td>{% if b.pub_map_id %}v{{ b.pub_map_id }}{% else %}—{% endif %}</td>
+        <td class="actions">
+          <a class="button" href="/batches/{{ b.id }}">查看</a>
+          {% if b.pub_run_id %}
+            <a class="button secondary" href="/batches/{{ b.id }}/download.csv">下载 CSV</a>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}
