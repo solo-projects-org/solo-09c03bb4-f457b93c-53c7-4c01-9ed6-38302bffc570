@@ -265,6 +265,153 @@ def create_app(db_path: str | None = None, start_worker: bool | None = None) -> 
             active = service.get_active_map(c)
         return {"status": "ok", "version": __version__, "active_map_version": active.id if active else None}
 
+    # ------------------------------------------------------------------
+    # Supply manifests (供数清单)
+    # ------------------------------------------------------------------
+
+    @app.get("/manifests", response_class=HTMLResponse)
+    def manifests_index(request: Request, msg: str | None = None, err: str | None = None):
+        with conn() as c:
+            # One WAL snapshot: readiness and the stale flags of every listed
+            # manifest are evaluated against the same committed state.
+            with db.read_tx(c):
+                active_map = service.get_active_map(c)
+                readiness = service.manifest_readiness(c, active_map)
+                manifests = service.list_manifests(c)
+        blockers = [item for item in readiness if item["category"] != "ready"]
+        return render(
+            request,
+            "manifests.html",
+            {
+                "active_map": active_map,
+                "readiness": readiness,
+                "blockers": blockers,
+                "manifests": manifests,
+                "msg": msg,
+                "err": err,
+            },
+        )
+
+    @app.post("/manifests")
+    def manifests_create(request: Request):
+        try:
+            manifest_id = service.create_manifest(app.state.settings["db_path"])
+        except service.ManifestBlocked as exc:
+            with conn() as c:
+                with db.read_tx(c):
+                    active_map = service.get_active_map(c)
+                    readiness = service.manifest_readiness(c, active_map)
+                    manifests = service.list_manifests(c)
+            return render(
+                request,
+                "manifests.html",
+                {
+                    "active_map": active_map,
+                    "readiness": readiness,
+                    "blockers": exc.blockers,
+                    "blocked_error": str(exc),
+                    "manifests": manifests,
+                    "msg": None,
+                    "err": None,
+                },
+                status_code=409,
+            )
+        except service.ServiceError as exc:
+            return _redirect("/manifests", err=str(exc))
+        return _redirect(f"/manifests/{manifest_id}", msg=f"供数清单 #{manifest_id} 已冻结")
+
+    @app.get("/manifests/{manifest_id}", response_class=HTMLResponse)
+    def manifest_detail(
+        request: Request,
+        manifest_id: int,
+        msg: str | None = None,
+        err: str | None = None,
+    ):
+        with conn() as c:
+            with db.read_tx(c):
+                manifest = service.get_manifest(c, manifest_id)
+                if manifest is None:
+                    raise HTTPException(status_code=404, detail="供数清单不存在")
+                active_map = service.get_active_map(c)
+                # A manifest may cover batches which were later deleted; the
+                # batch page would 404, so only advertise links that exist.
+                existing_batches = {
+                    int(row["id"])
+                    for row in c.execute(
+                        "SELECT id FROM batches WHERE id IN ({})".format(
+                            ",".join("?" for _ in manifest["items"])
+                        ),
+                        tuple(int(item["batch_id"]) for item in manifest["items"]),
+                    ).fetchall()
+                } if manifest["items"] else set()
+        return render(
+            request,
+            "manifest.html",
+            {
+                "manifest": manifest,
+                "active_map": active_map,
+                "existing_batches": existing_batches,
+                "msg": msg,
+                "err": err,
+            },
+        )
+
+    @app.get("/manifests/{manifest_id}/items/{batch_id}.csv")
+    def manifest_item_download(manifest_id: int, batch_id: int):
+        with conn() as c:
+            item = service.get_manifest_item_export(c, manifest_id, batch_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="供数清单中不存在该批次")
+        name = f"manifest{manifest_id}_batch{batch_id}_run{item['run_id']}.csv"
+        headers = {
+            "Content-Disposition": f"attachment; filename=\"{name}\"; filename*=UTF-8''{quote(name)}",
+            "Cache-Control": "no-store",
+        }
+        return StreamingResponse(
+            service.iter_manifest_item_csv(
+                app.state.settings["db_path"], manifest_id, batch_id
+            ),
+            media_type="text/csv; charset=utf-8",
+            headers=headers,
+        )
+
+    @app.get("/api/manifests/{manifest_id}")
+    def manifest_status(manifest_id: int):
+        """JSON view of a frozen manifest, including live staleness."""
+
+        with conn() as c:
+            with db.read_tx(c):
+                manifest = service.get_manifest(c, manifest_id)
+        if manifest is None:
+            raise HTTPException(status_code=404, detail="供数清单不存在")
+        return {
+            "manifest_id": manifest["id"],
+            "created_at": manifest["created_at"],
+            "map_version_id": manifest["map_version_id"],
+            "map_filename": manifest["map_filename"],
+            "map_sha256": manifest["map_sha256"],
+            "batch_count": manifest["batch_count"],
+            "total": manifest["total_count"],
+            "matched": manifest["matched_count"],
+            "conflict": manifest["conflict_count"],
+            "unmatched": manifest["unmatched_count"],
+            "stale": manifest["stale"],
+            "stale_reasons": manifest["stale_reasons"],
+            "items": [
+                {
+                    "batch_id": item["batch_id"],
+                    "filename": item["batch_filename"],
+                    "run_id": item["run_id"],
+                    "map_version_id": item["map_version_id"],
+                    "row_count": item["row_count"],
+                    "matched": item["matched_count"],
+                    "conflict": item["conflict_count"],
+                    "unmatched": item["unmatched_count"],
+                }
+                for item in manifest["items"]
+            ],
+        }
+
     return app
 
 

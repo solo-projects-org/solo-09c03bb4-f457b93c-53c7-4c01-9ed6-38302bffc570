@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}供数清单 · 林班归属{% endblock %}
+{% block content %}
+{% if blocked_error %}
+  <div class="flash flash-err">{{ blocked_error }}</div>
+{% endif %}
+<section class="card">
+  <div class="split">
+    <div>
+      <h2>创建供数清单</h2>
+      <p class="hint">
+        清单会把<strong>当前底图</strong>下全部批次的已发布归属冻结成一组：
+        每个批次固定当时的计算记录号、林班底图版本与明细行，之后逐项下载 CSV。
+        只有全部批次都就绪时才能生成，缺任何一个都不会生成半份清单。
+      </p>
+      {% if active_map %}
+        <p class="hint">当前底图 <strong>v{{ active_map.id }}</strong> · <span class="mono">{{ active_map.filename }}</span></p>
+      {% else %}
+        <p class="hint"><span class="pill pill-warn">尚未发布底图</span></p>
+      {% endif %}
+    </div>
+    <div class="actions">
+      <form method="post" action="/manifests" class="inline">
+        <button type="submit" {% if not readiness or blockers %}disabled{% endif %}>冻结当前全部批次为清单</button>
+      </form>
+    </div>
+  </div>
+
+  {% if readiness %}
+    <table class="compact">
+      <thead><tr><th>批次</th><th>文件</th><th>热点数</th><th>已发布计算</th><th>底图</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>
+      {% for b in readiness %}
+        <tr class="{{ 'row-ok' if b.category == 'ready' else 'row-warn' }}">
+          <td>#{{ b.batch_id }}</td>
+          <td class="mono">{{ b.filename }}</td>
+          <td>{{ b.row_count }}</td>
+          <td>{% if b.published_run_id %}run #{{ b.published_run_id }}{% else %}—{% endif %}</td>
+          <td>{% if b.published_map_version %}v{{ b.published_map_version }}{% else %}—{% endif %}</td>
+          <td>
+            {% if b.category == 'ready' %}
+              <span class="pill pill-ok">就绪</span>
+            {% elif b.category == 'pending' %}
+              <span class="pill pill-warn">待算</span>
+            {% elif b.category == 'failed' %}
+              <span class="pill pill-err">失败</span>
+            {% else %}
+              <span class="pill pill-mut">缺失</span>
+            {% endif %}
+          </td>
+          <td class="reason">{{ b.detail }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">还没有热点批次。先返回首页上传热点并完成计算。</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>已有供数清单</h2>
+  {% if not manifests %}
+    <p class="empty">还没有供数清单。</p>
+  {% else %}
+  <div class="table-wrap">
+  <table class="rows">
+    <thead>
+      <tr><th>清单</th><th>创建时间 (UTC)</th><th>底图</th><th>批次数</th><th>热点数</th>
+          <th>已赋码 / 冲突 / 未匹配</th><th>状态</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+    {% for m in manifests %}
+      <tr class="{{ 'row-warn' if m.stale else '' }}">
+        <td>#{{ m.id }}</td>
+        <td class="mono">{{ m.created_at }}</td>
+        <td>v{{ m.map_version_id }} <span class="muted mono">{{ m.map_filename }}</span></td>
+        <td>{{ m.batch_count }}</td>
+        <td>{{ m.total_count }}</td>
+        <td>{{ m.matched_count }} / {{ m.conflict_count }} / {{ m.unmatched_count }}</td>
+        <td>
+          {% if m.stale %}
+            <span class="pill pill-err">已过期</span>
+          {% else %}
+            <span class="pill pill-ok">有效</span>
+          {% endif %}
+        </td>
+        <td class="actions">
+          <a class="button secondary" href="/manifests/{{ m.id }}">查看</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

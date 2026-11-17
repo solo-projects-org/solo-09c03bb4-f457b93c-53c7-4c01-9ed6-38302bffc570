@@ -15,6 +15,10 @@ Consistency model
   previous downloadable detail survives.
 * Downloads resolve ``published_run_id`` once and then read only that run's
   result rows, so a concurrent republication cannot produce a mixed file.
+* A supply manifest freezes the whole set in one ``BEGIN IMMEDIATE``
+  transaction: it stores each batch's run id and map version at creation time
+  and never rewrites them.  Later uploads/publications only make it stale
+  (computed on view); its item CSVs keep reading the frozen run ids.
 """
 
 from __future__ import annotations
@@ -95,6 +99,350 @@ RESULT_COLUMNS = [
 
 class ServiceError(RuntimeError):
     pass
+
+
+# --------------------------------------------------------------------------
+# Supply manifests (供数清单)
+# --------------------------------------------------------------------------
+
+MANIFEST_MISSING = "missing"
+MANIFEST_PENDING = "pending"
+MANIFEST_FAILED = "failed"
+
+MANIFEST_BLOCK_LABELS = {
+    MANIFEST_MISSING: "缺失归属",
+    MANIFEST_PENDING: "待算",
+    MANIFEST_FAILED: "计算失败",
+}
+
+
+@dataclass(frozen=True)
+class ManifestBlocker:
+    batch_id: int
+    filename: str
+    category: str
+    detail: str
+
+    @property
+    def category_label(self) -> str:
+        return MANIFEST_BLOCK_LABELS.get(self.category, self.category)
+
+
+class ManifestBlocked(ServiceError):
+    """Creation was refused because the batch set is not fully usable.
+
+    The blocker list is part of the exception so the page can enumerate every
+    missing/pending/failed batch instead of failing with a bare message.
+    """
+
+    def __init__(self, blockers: Sequence[ManifestBlocker]):
+        self.blockers = list(blockers)
+        summary = "；".join(
+            f"批次 #{item.batch_id}（{item.filename}）{item.category_label}"
+            for item in self.blockers
+        )
+        super().__init__(f"不能生成不完整的供数清单：{summary}")
+
+
+def _runs_by_batch(conn: sqlite3.Connection) -> dict[int, list[sqlite3.Row]]:
+    rows = conn.execute(
+        "SELECT id, batch_id, map_version_id, status FROM runs ORDER BY id"
+    ).fetchall()
+    grouped: dict[int, list[sqlite3.Row]] = {}
+    for row in rows:
+        grouped.setdefault(int(row["batch_id"]), []).append(row)
+    return grouped
+
+
+def manifest_readiness(
+    conn: sqlite3.Connection, active: MapInfo | None = None
+) -> list[dict[str, Any]]:
+    """Classify every batch against the active map.
+
+    ``ready`` means the batch has a published run pinned to the *current*
+    active map and no computation is in flight.  Everything else is a blocker
+    with an explicit category (missing / pending / failed) so the page can
+    enumerate exactly which batch prevents a complete manifest.
+    """
+
+    active = active or get_active_map(conn)
+    runs_by_batch = _runs_by_batch(conn)
+    batches = conn.execute("SELECT * FROM batches ORDER BY id").fetchall()
+    out: list[dict[str, Any]] = []
+    for batch in batches:
+        batch_id = int(batch["id"])
+        runs = runs_by_batch.get(batch_id, [])
+        latest = runs[-1] if runs else None
+        in_flight = next(
+            (
+                run
+                for run in runs
+                if run["status"] in (STATUS_QUEUED, STATUS_RUNNING)
+            ),
+            None,
+        )
+        published = None
+        if batch["published_run_id"] is not None:
+            published = next(
+                (run for run in runs if int(run["id"]) == int(batch["published_run_id"])),
+                None,
+            )
+
+        category = "ready"
+        detail = ""
+        if active is None:
+            category = MANIFEST_MISSING
+            detail = "尚未发布林班底图"
+        elif in_flight is not None:
+            category = MANIFEST_PENDING
+            detail = f"计算记录 #{in_flight['id']} 仍在排队/计算中"
+        elif published is None:
+            if latest is not None and latest["status"] == STATUS_FAILED:
+                category = MANIFEST_FAILED
+                detail = f"最近计算记录 #{latest['id']} 失败，尚无已发布归属"
+            else:
+                category = MANIFEST_MISSING
+                detail = "尚未发布任何归属结果"
+        elif published["status"] != STATUS_SUCCEEDED:
+            category = MANIFEST_MISSING
+            detail = f"已发布计算记录 #{published['id']} 状态异常"
+        elif int(published["map_version_id"]) == active.id:
+            # A published current-map attribution is what the manifest freezes.
+            # A later failed recompute does not remove it, so it stays ready;
+            # we only surface the failure for the operator.
+            if latest is not None and latest["status"] == STATUS_FAILED:
+                detail = (
+                    f"当前底图归属已发布（run #{published['id']}）；"
+                    f"最近一次重算 #{latest['id']} 失败，未影响该结果"
+                )
+        elif latest is not None and latest["status"] == STATUS_FAILED:
+            category = MANIFEST_FAILED
+            detail = (
+                f"按当前底图 v{active.id} 的重算（计算记录 #{latest['id']}）失败；"
+                f"已发布结果仍基于 v{published['map_version_id']}"
+            )
+        else:
+            category = MANIFEST_PENDING
+            detail = (
+                f"已发布结果基于 v{published['map_version_id']}，"
+                f"需按当前底图 v{active.id} 重算"
+            )
+        out.append(
+            {
+                "batch_id": batch_id,
+                "filename": batch["filename"],
+                "row_count": batch["row_count"],
+                "category": category,
+                "category_label": (
+                    "就绪" if category == "ready" else MANIFEST_BLOCK_LABELS.get(category, category)
+                ),
+                "detail": detail,
+                "published_run_id": int(batch["published_run_id"])
+                if batch["published_run_id"] is not None
+                else None,
+                "published_map_version": int(published["map_version_id"]) if published else None,
+            }
+        )
+    return out
+
+
+def _blockers_from_readiness(readiness: Sequence[dict[str, Any]]) -> list[ManifestBlocker]:
+    return [
+        ManifestBlocker(
+            batch_id=item["batch_id"],
+            filename=item["filename"],
+            category=item["category"],
+            detail=item["detail"],
+        )
+        for item in readiness
+        if item["category"] != "ready"
+    ]
+
+
+def create_manifest(db_path: str) -> int:
+    """Freeze all currently published attributions into one manifest.
+
+    The whole check-and-insert runs inside a single ``BEGIN IMMEDIATE``
+    transaction.  A map swap, a batch upload or a publication on another web
+    instance either happens completely before this transaction (and is
+    reflected in the new manifest) or completely after it (and only makes the
+    manifest stale).  A partial manifest can therefore never be written.
+    """
+
+    with db.connection(db_path) as conn:
+        with db.write_tx(conn):
+            active = get_active_map(conn)
+            readiness = manifest_readiness(conn, active)
+            if not readiness:
+                raise ServiceError("还没有热点批次，无法生成供数清单")
+            blockers = _blockers_from_readiness(readiness)
+            if blockers:
+                raise ManifestBlocked(blockers)
+
+            items = readiness  # every item is "ready" here
+            cur = conn.execute(
+                """
+                INSERT INTO manifests
+                    (created_at, map_version_id, batch_count, total_count,
+                     matched_count, conflict_count, unmatched_count)
+                VALUES (?, ?, ?, 0, 0, 0, 0)
+                """,
+                (db.utc_now(), active.id, len(items)),
+            )
+            manifest_id = int(cur.lastrowid)
+            total = matched = conflict = unmatched = 0
+            for item in items:
+                run = conn.execute(
+                    "SELECT * FROM runs WHERE id = ?", (item["published_run_id"],)
+                ).fetchone()
+                if run is None:  # pragma: no cover - guarded by the readiness pass
+                    raise ServiceError(f"批次 #{item['batch_id']} 的已发布计算记录不存在")
+                row_count = int(run["total_count"])
+                total += row_count
+                matched += int(run["matched_count"])
+                conflict += int(run["conflict_count"])
+                unmatched += int(run["unmatched_count"])
+                conn.execute(
+                    """
+                    INSERT INTO manifest_items
+                        (manifest_id, batch_id, run_id, map_version_id, row_count,
+                         matched_count, conflict_count, unmatched_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        manifest_id,
+                        item["batch_id"],
+                        int(run["id"]),
+                        int(run["map_version_id"]),
+                        row_count,
+                        int(run["matched_count"]),
+                        int(run["conflict_count"]),
+                        int(run["unmatched_count"]),
+                    ),
+                )
+            conn.execute(
+                """
+                UPDATE manifests SET total_count = ?, matched_count = ?,
+                    conflict_count = ?, unmatched_count = ?
+                WHERE id = ?
+                """,
+                (total, matched, conflict, unmatched, manifest_id),
+            )
+            return manifest_id
+
+
+def _manifest_row(conn: sqlite3.Connection, manifest_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT m.*, mv.filename AS map_filename, mv.sha256 AS map_sha256
+        FROM manifests m JOIN map_versions mv ON mv.id = m.map_version_id
+        WHERE m.id = ?
+        """,
+        (manifest_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _manifest_items(conn: sqlite3.Connection, manifest_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT mi.*, b.filename AS batch_filename, b.created_at AS batch_created_at,
+               r.status AS run_status, r.finished_at AS run_finished_at
+        FROM manifest_items mi
+        LEFT JOIN batches b ON b.id = mi.batch_id
+        LEFT JOIN runs r ON r.id = mi.run_id
+        WHERE mi.manifest_id = ?
+        ORDER BY mi.batch_id
+        """,
+        (manifest_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def manifest_staleness(
+    conn: sqlite3.Connection, manifest: dict[str, Any], items: Sequence[dict[str, Any]]
+) -> list[str]:
+    """Return human-readable reasons the frozen manifest no longer matches.
+
+    Staleness is evaluated against committed state each time the manifest is
+    viewed.  It intentionally never mutates the manifest: the frozen run ids
+    and their CSV rows stay available exactly as created.
+    """
+
+    reasons: list[str] = []
+    active = get_active_map(conn)
+    if active is None:
+        reasons.append(f"当前没有活动底图（清单冻结于 v{manifest['map_version_id']}）")
+    elif active.id != int(manifest["map_version_id"]):
+        reasons.append(
+            f"当前底图已变为 v{active.id}（清单冻结于 v{manifest['map_version_id']}）"
+        )
+
+    current_batches = {
+        int(row["id"]): row
+        for row in conn.execute("SELECT id, published_run_id FROM batches").fetchall()
+    }
+    frozen_ids = {int(item["batch_id"]) for item in items}
+    added = sorted(set(current_batches) - frozen_ids)
+    removed = sorted(frozen_ids - set(current_batches))
+    if added:
+        reasons.append("新增批次：" + "、".join(f"#{batch_id}" for batch_id in added))
+    if removed:
+        reasons.append("批次已不存在：" + "、".join(f"#{batch_id}" for batch_id in removed))
+
+    for item in items:
+        batch = current_batches.get(int(item["batch_id"]))
+        if batch is None:
+            continue
+        if batch["published_run_id"] is None:
+            reasons.append(f"批次 #{item['batch_id']} 已无已发布归属")
+        elif int(batch["published_run_id"]) != int(item["run_id"]):
+            reasons.append(
+                f"批次 #{item['batch_id']} 已发布新的计算记录 "
+                f"#{int(batch['published_run_id'])}（清单固定为 #{item['run_id']}）"
+            )
+    return reasons
+
+
+def get_manifest(conn: sqlite3.Connection, manifest_id: int) -> dict[str, Any] | None:
+    manifest = _manifest_row(conn, manifest_id)
+    if manifest is None:
+        return None
+    items = _manifest_items(conn, manifest_id)
+    manifest["items"] = items
+    manifest["stale_reasons"] = manifest_staleness(conn, manifest, items)
+    manifest["stale"] = bool(manifest["stale_reasons"])
+    return manifest
+
+
+def list_manifests(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
+    ids = conn.execute("SELECT id FROM manifests ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in ids:
+        manifest = get_manifest(conn, int(row["id"]))
+        if manifest is not None:
+            out.append(manifest)
+    return out
+
+
+def get_manifest_item_export(conn: sqlite3.Connection, manifest_id: int, batch_id: int) -> dict[str, Any] | None:
+    """Resolve an item for download, independent of the batch's current state.
+
+    The run id comes from the frozen item, never from ``batches.published_run_id``
+    — a later publication (or a failed recompute) must not change this file.
+    """
+
+    row = conn.execute(
+        """
+        SELECT mi.*, m.created_at AS manifest_created_at, mv.filename AS map_filename
+        FROM manifest_items mi
+        JOIN manifests m ON m.id = mi.manifest_id
+        JOIN map_versions mv ON mv.id = mi.map_version_id
+        WHERE mi.manifest_id = ? AND mi.batch_id = ?
+        """,
+        (manifest_id, batch_id),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 @dataclass(frozen=True)
@@ -769,6 +1117,38 @@ def is_run_active(conn: sqlite3.Connection, batch_id: int) -> bool:
 def iter_result_csv(db_path: str, batch_id: int, chunk: int = 1000) -> Iterator[str]:
     """Yield the published detail as CSV, pinned to one published run."""
 
+    with db.connection(db_path) as conn:
+        with db.read_tx(conn):
+            batch = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+            if batch is None:
+                raise ServiceError("热点批次不存在")
+            run_id = batch["published_run_id"]
+            if run_id is None:
+                raise ServiceError("该批次还没有可下载的计算结果")
+    return iter_run_csv(db_path, batch_id, int(run_id), chunk=chunk)
+
+
+def iter_manifest_item_csv(
+    db_path: str, manifest_id: int, batch_id: int, chunk: int = 1000
+) -> Iterator[str]:
+    """Yield one manifest item's CSV, pinned to the run frozen in the manifest."""
+
+    with db.connection(db_path) as conn:
+        with db.read_tx(conn):
+            item = get_manifest_item_export(conn, manifest_id, batch_id)
+            if item is None:
+                raise ServiceError("供数清单中不存在该批次")
+            run_id = int(item["run_id"])
+    return iter_run_csv(db_path, batch_id, run_id, chunk=chunk)
+
+
+def iter_run_csv(db_path: str, batch_id: int, run_id: int, chunk: int = 1000) -> Iterator[str]:
+    """Yield a run's detail as CSV.  Reads only result rows of ``run_id``.
+
+    The whole read happens in one WAL read transaction, so concurrent
+    publication of a newer run cannot mix rows into this file.
+    """
+
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\r\n")
 
@@ -780,19 +1160,13 @@ def iter_result_csv(db_path: str, batch_id: int, chunk: int = 1000) -> Iterator[
 
     with db.connection(db_path) as conn:
         with db.read_tx(conn):
-            batch = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
-            if batch is None:
-                raise ServiceError("热点批次不存在")
-            run_id = batch["published_run_id"]
-            if run_id is None:
-                raise ServiceError("该批次还没有可下载的计算结果")
             run = conn.execute(
                 """
                 SELECT r.*, m.filename AS map_filename, m.id AS map_id
                 FROM runs r JOIN map_versions m ON m.id = r.map_version_id
-                WHERE r.id = ?
+                WHERE r.id = ? AND r.batch_id = ?
                 """,
-                (run_id,),
+                (run_id, batch_id),
             ).fetchone()
             if run is None:
                 raise ServiceError("已发布的计算结果不存在")

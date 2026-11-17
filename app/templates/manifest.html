@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}供数清单 #{{ manifest.id }} · 林班归属{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="split">
+    <div>
+      <h2>供数清单 #{{ manifest.id }}
+        {% if manifest.stale %}
+          <span class="pill pill-err">已过期</span>
+        {% else %}
+          <span class="pill pill-ok">有效</span>
+        {% endif %}
+      </h2>
+      <p class="hint">
+        冻结于 {{ manifest.created_at }} · 林班底图
+        <strong>v{{ manifest.map_version_id }}</strong> · <span class="mono">{{ manifest.map_filename }}</span>
+        （sha256 <span class="mono">{{ manifest.map_sha256[:16] }}…</span>）
+      </p>
+    </div>
+    <div class="actions">
+      <a class="button secondary" href="/manifests">全部清单</a>
+      <a class="button secondary" href="/">返回首页</a>
+    </div>
+  </div>
+
+  {% if manifest.stale %}
+    <div class="flash flash-warn">
+      该清单已过期，不再代表当前底图下的完整归属结果。以下条目仍固定为创建时的计算记录与 CSV，可照常下载。
+      <ul>
+        {% for reason in manifest.stale_reasons %}
+          <li>{{ reason }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% else %}
+    <div class="flash flash-ok">清单与当前已发布状态一致：全部批次均基于底图 v{{ manifest.map_version_id }}。</div>
+  {% endif %}
+
+  <div class="stat-row">
+    <div class="stat"><span class="num">{{ manifest.batch_count }}</span><span class="lbl">批次</span></div>
+    <div class="stat"><span class="num">{{ manifest.total_count }}</span><span class="lbl">来源热点</span></div>
+    <div class="stat stat-ok"><span class="num">{{ manifest.matched_count }}</span><span class="lbl">已赋码</span></div>
+    <div class="stat stat-warn"><span class="num">{{ manifest.conflict_count }}</span><span class="lbl">归属冲突</span></div>
+    <div class="stat stat-mut"><span class="num">{{ manifest.unmatched_count }}</span><span class="lbl">未匹配</span></div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>清单条目</h2>
+  <p class="hint">每项固定创建时的计算记录号与底图版本；下载只读该计算记录的结果行。</p>
+  <div class="table-wrap">
+  <table class="rows">
+    <thead>
+      <tr><th>批次</th><th>文件</th><th>热点数</th><th>计算记录</th><th>底图</th>
+          <th>已赋码 / 冲突 / 未匹配</th><th>计算状态</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+    {% for item in manifest["items"] %}
+      <tr>
+        <td>#{{ item.batch_id }}</td>
+        <td class="mono">{{ item.batch_filename or '（批次已不存在）' }}</td>
+        <td>{{ item.row_count }}</td>
+        <td>run #{{ item.run_id }}</td>
+        <td>v{{ item.map_version_id }}</td>
+        <td>{{ item.matched_count }} / {{ item.conflict_count }} / {{ item.unmatched_count }}</td>
+        <td>{{ item.run_status|run_status_label }}</td>
+        <td class="actions">
+          <a class="button secondary" href="/manifests/{{ manifest.id }}/items/{{ item.batch_id }}.csv">下载 CSV</a>
+          {% if item.batch_id in existing_batches %}<a class="button secondary" href="/batches/{{ item.batch_id }}">批次页</a>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endblock %}

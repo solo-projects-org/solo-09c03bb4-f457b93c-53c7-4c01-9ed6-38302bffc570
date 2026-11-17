@@ -48,7 +48,12 @@
 </section>
 
 <section class="card">
-  <h2>热点批次</h2>
+  <div class="split">
+    <h2>热点批次</h2>
+    <div class="actions">
+      <a class="button secondary" href="/manifests">供数清单</a>
+    </div>
+  </div>
   {% if not batches %}
     <p class="empty">还没有热点批次。可先使用 <code>samples/</code> 下的样例数据。</p>
   {% else %}

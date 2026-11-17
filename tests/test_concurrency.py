@@ -166,6 +166,94 @@ def test_two_servers_publish_single_consistent_version(tmp_path):
 
 
 @pytest.mark.slow
+def test_two_servers_freeze_consistent_manifest_while_churning(tmp_path):
+    """Manifest creation on one instance races map swaps on the other.
+
+    Every manifest that is successfully created must be internally consistent:
+    all items pinned to the manifest's map version and to runs that really
+    published; later churn only marks it stale, and every item CSV stays
+    downloadable and byte-stable.
+    """
+
+    db_path = tmp_path / "forest.db"
+    port_a, port_b = free_port(), free_port()
+    server_a = Server(db_path, port_a, tmp_path)
+    server_b = Server(db_path, port_b, tmp_path)
+    server_a.wait_ready()
+    server_b.wait_ready()
+    try:
+        with httpx.Client(base_url=server_a.base, timeout=30) as client_a, httpx.Client(
+            base_url=server_b.base, timeout=30
+        ) as client_b:
+            upload_map(client_a, "v1.geojson", (SAMPLES / "compartments_v1.geojson").read_bytes())
+            upload_hotspots(client_a, (SAMPLES / "hotspots.csv").read_bytes())
+            wait_published(client_a, 1)
+
+            first = client_a.post(f"{client_a.base_url}/manifests", follow_redirects=False)
+            assert first.status_code == 303, first.text
+            manifest_id = int(first.headers["location"].split("/")[2].split("?")[0])
+            frozen = client_a.get(f"{client_a.base_url}/api/manifests/{manifest_id}").json()
+            assert frozen["stale"] is False
+            before = {
+                item["batch_id"]: client_a.get(
+                    f"{client_a.base_url}/manifests/{manifest_id}/items/{item['batch_id']}.csv"
+                ).content
+                for item in frozen["items"]
+            }
+
+            import threading
+
+            errors: list[BaseException] = []
+            stop = threading.Event()
+
+            def churn():
+                v2 = (SAMPLES / "compartments_v2.geojson").read_bytes()
+                v1 = (SAMPLES / "compartments_v1.geojson").read_bytes()
+                try:
+                    turn = 0
+                    while not stop.is_set():
+                        upload_map(client_b, f"v{turn}.geojson", v2 if turn % 2 == 0 else v1)
+                        client_b.post(
+                            f"{client_b.base_url}/batches/1/recompute", follow_redirects=False
+                        )
+                        turn += 1
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            thread = threading.Thread(target=churn)
+            thread.start()
+            try:
+                time.sleep(2.0)
+            finally:
+                stop.set()
+                thread.join()
+            assert not errors, errors
+
+            after = client_a.get(f"{client_a.base_url}/api/manifests/{manifest_id}").json()
+            assert after["stale"] is True
+            assert {item["run_id"] for item in after["items"]} == {
+                item["run_id"] for item in frozen["items"]
+            }
+            for item in after["items"]:
+                download = client_a.get(
+                    f"{client_a.base_url}/manifests/{manifest_id}/items/{item['batch_id']}.csv"
+                )
+                assert download.status_code == 200
+                assert download.content == before[item["batch_id"]]
+                assert all(
+                    "v1" in line
+                    for line in download.content.decode("utf-8-sig").splitlines()[1:]
+                )
+
+            # The frozen map version is recorded on the manifest and each item.
+            assert all(item["map_version_id"] == 1 for item in after["items"])
+            assert after["map_version_id"] == 1
+    finally:
+        server_a.stop()
+        server_b.stop()
+
+
+@pytest.mark.slow
 def test_concurrent_map_swaps_leave_exactly_one_active(tmp_path):
     db_path = tmp_path / "forest.db"
     port_a, port_b = free_port(), free_port()

@@ -91,6 +91,34 @@ CREATE TABLE IF NOT EXISTS results (
     codes_json      TEXT NOT NULL,
     PRIMARY KEY (run_id, hotspot_seq)
 );
+
+-- A supply manifest is an immutable snapshot: which run (and therefore which
+-- map version) each batch contributed at creation time.  Later publications or
+-- uploads only make it stale; they never change its rows.
+CREATE TABLE IF NOT EXISTS manifests (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at      TEXT NOT NULL,
+    map_version_id  INTEGER NOT NULL REFERENCES map_versions(id),
+    batch_count     INTEGER NOT NULL,
+    total_count     INTEGER NOT NULL,
+    matched_count   INTEGER NOT NULL,
+    conflict_count  INTEGER NOT NULL,
+    unmatched_count INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS manifest_items (
+    manifest_id     INTEGER NOT NULL REFERENCES manifests(id) ON DELETE CASCADE,
+    batch_id        INTEGER NOT NULL REFERENCES batches(id),
+    run_id          INTEGER NOT NULL REFERENCES runs(id),
+    map_version_id  INTEGER NOT NULL REFERENCES map_versions(id),
+    row_count       INTEGER NOT NULL,
+    matched_count   INTEGER NOT NULL,
+    conflict_count  INTEGER NOT NULL,
+    unmatched_count INTEGER NOT NULL,
+    PRIMARY KEY (manifest_id, batch_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_manifest_items_run ON manifest_items (run_id);
 """
 
 
